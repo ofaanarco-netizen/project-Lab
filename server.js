@@ -1,10 +1,32 @@
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const fs = require('fs');
 const mysql = require('mysql2/promise'); // Menggunakan versi promise untuk async/await
 
 const app = express();
 const port = 3000;
+
+// Konfigurasi folder penyimpanan uploads
+const uploadsDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
+// Helper untuk menyimpan gambar Base64 ke folder uploads
+function saveBase64Image(dataString, prefix = 'photo') {
+    if (!dataString || typeof dataString !== 'string') return null;
+    const matches = dataString.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
+    if (!matches || matches.length !== 3) {
+        return null;
+    }
+    const ext = matches[1].includes('png') ? 'png' : 'jpg';
+    const buffer = Buffer.from(matches[2], 'base64');
+    const filename = `${prefix}_${Date.now()}_${Math.random().toString(36).substring(2, 8)}.${ext}`;
+    const filePath = path.join(uploadsDir, filename);
+    fs.writeFileSync(filePath, buffer);
+    return filename;
+}
 
 // Konfigurasi koneksi MySQL
 const pool = mysql.createPool({
@@ -40,8 +62,10 @@ const getAvailableProjectorIds = async () => {
 };
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(express.static(path.join(__dirname)));
+app.use('/uploads', express.static(uploadsDir));
 
 // --- Helper Functions --- (yang sudah dihapus)
 
@@ -410,7 +434,9 @@ app.get('/api/loans', async (req, res) => {
               p.waktu_pinjam as borrowedAt, 
               p.waktu_kembali as returnedAt, 
               p.status,
-              COALESCE(p.nama_pemilik_perangkat, proj.milik) AS deviceOwnerName
+              COALESCE(p.nama_pemilik_perangkat, proj.milik) AS deviceOwnerName,
+              p.foto_pinjam as borrowPhoto,
+              p.foto_kembali as returnPhoto
           FROM peminjaman p
           JOIN mahasiswas m_borrower ON p.id_mahasiswa = m_borrower.id_mahasiswa
           LEFT JOIN proyektor proj ON p.id_perangkat = proj.id_proyektor AND p.tipe_perangkat = 'Proyektor'
@@ -432,12 +458,15 @@ app.get('/api/loans', async (req, res) => {
 // POST a new loan
 
 app.post('/api/loans', async (req, res) => {
-    const { id_mahasiswa, deviceType } = req.body; // deviceId will be determined for Laptop
+    const { id_mahasiswa, deviceType, foto, foto_pinjam } = req.body; // deviceId will be determined for Laptop
     let { deviceId } = req.body; // deviceId is explicitly passed for Projector
     let namaPeminjam = null;
     let namaPemilikPerangkat = null;
 
     try {
+        // Simpan foto bukti peminjaman jika ada
+        const fotoPinjamFilename = saveBase64Image(foto || foto_pinjam, 'pinjam');
+
         // 1. Validate id_mahasiswa (borrower) against mahasiswas table
         const [mahasiswaRows] = await pool.query('SELECT nama_mahasiswa FROM mahasiswas WHERE id_mahasiswa = ?', [id_mahasiswa]);
         if (mahasiswaRows.length === 0) {
@@ -505,15 +534,15 @@ app.post('/api/loans', async (req, res) => {
             // Always update nama_peminjam during reactivation
             updateNamaPeminjam = `, nama_peminjam = '${namaPeminjam}'`;
 
-            await pool.query(`UPDATE peminjaman SET waktu_pinjam = NOW(), waktu_kembali = NULL, status = 'active'${updateNamaPemilik}${updateNamaPeminjam} WHERE id_peminjaman = ?`, [loanToReactivateId]);
+            await pool.query(`UPDATE peminjaman SET waktu_pinjam = NOW(), waktu_kembali = NULL, status = 'active', foto_pinjam = COALESCE(?, foto_pinjam)${updateNamaPemilik}${updateNamaPeminjam} WHERE id_peminjaman = ?`, [fotoPinjamFilename, loanToReactivateId]);
             broadcastToAdmins({ type: 'loan_updated' });
             return res.status(200).json({ message: 'Peminjaman berhasil diaktifkan kembali.' });
         }
 
         // 5. Jika tidak ada, buat peminjaman baru
         const [result] = await pool.query(
-            "INSERT INTO peminjaman (id_mahasiswa, tipe_perangkat, id_perangkat, waktu_pinjam, status, nama_pemilik_perangkat, nama_peminjam) VALUES (?, ?, ?, NOW(), 'active', ?, ?)",
-            [id_mahasiswa, deviceType, deviceId, namaPemilikPerangkat, namaPeminjam]
+            "INSERT INTO peminjaman (id_mahasiswa, tipe_perangkat, id_perangkat, waktu_pinjam, status, nama_pemilik_perangkat, nama_peminjam, foto_pinjam) VALUES (?, ?, ?, NOW(), 'active', ?, ?, ?)",
+            [id_mahasiswa, deviceType, deviceId, namaPemilikPerangkat, namaPeminjam, fotoPinjamFilename]
         );
         broadcastToAdmins({ type: 'loan_updated' });
         res.status(201).json({ message: 'Peminjaman baru berhasil dibuat', id: result.insertId });
@@ -564,10 +593,12 @@ app.put('/api/loans/:id', async (req, res) => {
     // Endpoint ini khusus untuk menandai sebagai 'dikembalikan'
 
     if (req.body.returnedAt) {
-
         try {
-
-            const [result] = await pool.query("UPDATE peminjaman SET status = 'returned', waktu_kembali = NOW() WHERE id_peminjaman = ?", [req.params.id]);
+            const fotoKembaliFilename = saveBase64Image(req.body.foto || req.body.foto_kembali, 'kembali');
+            const [result] = await pool.query(
+                "UPDATE peminjaman SET status = 'returned', waktu_kembali = NOW(), foto_kembali = COALESCE(?, foto_kembali) WHERE id_peminjaman = ?",
+                [fotoKembaliFilename, req.params.id]
+            );
 
             if (result.affectedRows === 0) {
 
@@ -899,7 +930,9 @@ app.get('/api/loans/history', async (req, res) => {
                 p.waktu_pinjam as borrowedAt, 
                 p.waktu_kembali as returnedAt, 
                 p.status,
-                COALESCE(p.nama_pemilik_perangkat, proj.milik) AS deviceOwnerName
+                COALESCE(p.nama_pemilik_perangkat, proj.milik) AS deviceOwnerName,
+                p.foto_pinjam as borrowPhoto,
+                p.foto_kembali as returnPhoto
             FROM peminjaman p
             JOIN mahasiswas m_borrower ON p.id_mahasiswa = m_borrower.id_mahasiswa
             LEFT JOIN proyektor proj ON p.id_perangkat = proj.id_proyektor AND p.tipe_perangkat = 'Proyektor'

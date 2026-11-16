@@ -62,17 +62,36 @@
         </div>
     </div>
 
-    <!-- Scan Card Section -->
-    <div class="container mt-5 text-center hidden" id="scan-kartu-menu">
-        <h2>Silahkan Scan Kartu Anda</h2>
-        <i class="fa-solid fa-id-card fa-10x text-muted mb-3"></i>
+    <!-- Scan Card Section with Live Camera Feed -->
+    <div class="container mt-4 text-center hidden" id="scan-kartu-menu">
+        <h2 class="mb-3">Silahkan Scan Kartu Anda</h2>
+        
+        <!-- Live Camera Box -->
+        <div class="row justify-content-center mb-3">
+            <div class="col-md-6 col-lg-5">
+                <div class="card shadow-sm p-3 text-white" style="background: #1e293b; border-radius: 16px; border: 1px solid #334155;">
+                    <div style="position: relative; width: 100%; aspect-ratio: 4/3; max-height: 260px; overflow: hidden; border-radius: 10px; background: #0f172a;" class="d-flex align-items-center justify-content-center">
+                        <video id="camera-feed" autoplay playsinline muted style="width: 100%; height: 100%; object-fit: cover;"></video>
+                        <canvas id="camera-canvas" class="d-none"></canvas>
+                        <!-- Face Guideline Overlay -->
+                        <div id="camera-overlay" style="position: absolute; width: 170px; height: 210px; border: 2px dashed rgba(255,255,255,0.7); border-radius: 50%; pointer-events: none; box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.25);"></div>
+                    </div>
+                    <div class="mt-2 d-flex justify-content-between align-items-center px-1">
+                        <small id="camera-status" class="text-white-50"><i class="fa-solid fa-spinner fa-spin"></i> Menyiapkan kamera...</small>
+                        <span class="badge bg-primary"><i class="fa-solid fa-camera"></i> Bukti Visual</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <div class="row justify-content-center">
             <div class="col-md-6">
-                <input type="text" class="form-control text-center" id="card-input" placeholder="Ketik ID Anda lalu tekan Enter">
+                <p class="text-muted mb-2"><i class="fa-solid fa-id-card me-1"></i> Arahkan wajah ke kamera, lalu scan kartu atau ketik ID:</p>
+                <input type="text" class="form-control form-control-lg text-center shadow-sm" id="card-input" placeholder="Scan kartu / ketik ID lalu tekan Enter" autofocus autocomplete="off">
             </div>
         </div>
         <br>
-        <button class="btn btn-secondary mt-2" id="kembali-btn">Kembali</button>
+        <button class="btn btn-secondary mt-1 px-4" id="kembali-btn"><i class="fa-solid fa-arrow-left me-1"></i> Kembali</button>
     </div>
 
     <!-- Existing Loan Options Menu -->
@@ -139,6 +158,13 @@
                 const pendingStatusMenu = document.getElementById('pending-status-menu'); // New
                 const cardInput = document.getElementById('card-input');
                 
+                // Camera Elements
+                const cameraFeed = document.getElementById('camera-feed');
+                const cameraCanvas = document.getElementById('camera-canvas');
+                const cameraStatus = document.getElementById('camera-status');
+                let cameraStream = null;
+                let lastCapturedPhoto = null;
+
                 // Modal Elements
                 const projectorSelectionModal = new bootstrap.Modal(document.getElementById('projectorSelectionModal'));
                 const availableProjectorsList = document.getElementById('availableProjectorsList');
@@ -157,6 +183,56 @@
                 let scannedStudentId = ''; // Store student ID after scan
                 let activeLoan = null;
                 let eventSource = null;
+
+                // --- Camera Helper Functions ---
+                async function startCamera() {
+                    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                        if (cameraStatus) cameraStatus.innerHTML = '<span class="text-warning"><i class="fa-solid fa-triangle-exclamation"></i> Browser tidak mendukung akses kamera</span>';
+                        return;
+                    }
+                    try {
+                        if (cameraStatus) cameraStatus.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Menghubungkan kamera...';
+                        cameraStream = await navigator.mediaDevices.getUserMedia({
+                            video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' },
+                            audio: false
+                        });
+                        cameraFeed.srcObject = cameraStream;
+                        cameraFeed.play().catch(e => console.log('Autoplay issue:', e));
+                        if (cameraStatus) cameraStatus.innerHTML = '<span class="text-success"><i class="fa-solid fa-circle text-success me-1"></i> Kamera Aktif</span>';
+                    } catch (err) {
+                        console.warn('Camera error/denied:', err);
+                        if (cameraStatus) cameraStatus.innerHTML = '<span class="text-warning"><i class="fa-solid fa-triangle-exclamation"></i> Akses kamera tidak tersedia / ditolak</span>';
+                    }
+                }
+
+                function stopCamera() {
+                    if (cameraStream) {
+                        cameraStream.getTracks().forEach(track => track.stop());
+                        cameraStream = null;
+                    }
+                    if (cameraFeed) {
+                        cameraFeed.srcObject = null;
+                    }
+                }
+
+                function capturePhoto() {
+                    if (!cameraFeed || !cameraStream) return null;
+                    try {
+                        const width = cameraFeed.videoWidth || 640;
+                        const height = cameraFeed.videoHeight || 480;
+                        if (width === 0 || height === 0) return null;
+                        cameraCanvas.width = width;
+                        cameraCanvas.height = height;
+                        const ctx = cameraCanvas.getContext('2d');
+                        ctx.drawImage(cameraFeed, 0, 0, width, height);
+                        const photoDataUrl = cameraCanvas.toDataURL('image/jpeg', 0.8);
+                        lastCapturedPhoto = photoDataUrl;
+                        return photoDataUrl;
+                    } catch (err) {
+                        console.error('Failed to capture frame from webcam:', err);
+                        return null;
+                    }
+                }
     
                 pilihButtons.forEach(button => {
                     button.addEventListener('click', function (event) {
@@ -180,6 +256,8 @@
                             alert('Silahkan masukkan ID pengguna.');
                             return;
                         }
+                        // Ambil foto snapshot saat ini sebagai bukti visual
+                        capturePhoto();
                         await checkActiveLoan(scannedStudentId);
                     }
                 });
@@ -221,18 +299,24 @@
                     }
                 }
     
-                async function createLoan(studentId, deviceType, deviceId) {
+                async function createLoan(studentId, deviceType, deviceId, photo) {
                     try {
+                        const payload = { 
+                            id_mahasiswa: studentId, 
+                            deviceType, 
+                            deviceId,
+                            foto: photo || lastCapturedPhoto
+                        };
                         const response = await fetch('/api/loans', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ id_mahasiswa: studentId, deviceType, deviceId })
+                            body: JSON.stringify(payload)
                         });
                         const data = await response.json();
                         if (!response.ok) {
                             throw new Error(data.message);
                         }
-                        alert(data.message);
+                        alert(data.message + (payload.foto ? '\n(Bukti foto berhasil disimpan)' : ''));
                         resetUI();
                     } catch (error) {
                         console.error('Error:', error);
@@ -244,19 +328,23 @@
                 async function handleReturnLoan() {
                     if (!activeLoan) return;
                     try {
+                        const returnPhoto = capturePhoto() || lastCapturedPhoto;
                         const response = await fetch(`/api/loans/${activeLoan.id}`, {
                             method: 'PUT',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ returnedAt: new Date().toISOString() })
+                            body: JSON.stringify({ 
+                                returnedAt: new Date().toISOString(),
+                                foto: returnPhoto
+                            })
                         });
                         await response.json();
-                        alert('Perangkat berhasil dikembalikan.');
+                        alert('Perangkat berhasil dikembalikan' + (returnPhoto ? ' (Bukti foto pengembalian tersimpan).' : '.'));
                         resetUI();
                     } catch (error) {
-                            console.error('Error returning loan:', error);
-                            alert('Gagal mengembalikan perangkat.');
-                        }
+                        console.error('Error returning loan:', error);
+                        alert('Gagal mengembalikan perangkat.');
                     }
+                }
     
                 async function handleReloanRequest() {
                     if (!activeLoan) return;
@@ -310,15 +398,19 @@
                     pendingStatusMenu.style.display = 'none'; // New
     
                     if (screenName === 'perangkat') {
+                        stopCamera();
                         perangkatMenu.style.display = 'block';
                     } else if (screenName === 'scan') {
                         scanKartuMenu.style.display = 'block';
+                        startCamera();
                         cardInput.focus();
                     } else if (screenName === 'existing') {
                         existingLoanMenu.style.display = 'block';
                     } else if (screenName === 'waiting') {
+                        stopCamera();
                         waitingAdminMenu.style.display = 'block';
                     } else if (screenName === 'pending_status') { // New
+                        stopCamera();
                         pendingStatusMenu.style.display = 'block';
                     }
                 }
@@ -354,8 +446,8 @@
                 function selectProjector(projectorId) {
                     selectedDeviceId = projectorId;
                     projectorSelectionModal.hide();
-                    // After selecting a projector, create the loan with the stored student ID
-                    createLoan(scannedStudentId, 'Proyektor', selectedDeviceId);
+                    // After selecting a projector, create the loan with the stored student ID and captured photo
+                    createLoan(scannedStudentId, 'Proyektor', selectedDeviceId, lastCapturedPhoto);
                 }
     
                 function resetUI() {
@@ -363,12 +455,14 @@
                         eventSource.close();
                         eventSource = null;
                     }
+                    stopCamera();
                     showScreen('perangkat');
                     cardInput.value = '';
                     selectedDeviceType = '';
                     selectedDeviceId = '';
                     scannedStudentId = '';
                     activeLoan = null;
+                    lastCapturedPhoto = null;
                 }
     
                 // Initial setup
